@@ -70,8 +70,6 @@
   .toast{position:fixed;bottom:calc(24px + env(safe-area-inset-bottom,0px));left:50%;transform:translateX(-50%) translateY(80px);background:#212127;border:1px solid #2f2f36;color:#e8e8ea;padding:13px 22px;border-radius:12px;font-size:14px;opacity:0;transition:.3s;z-index:200;box-shadow:0 12px 34px rgba(0,0,0,.45);max-width:90vw;text-align:center}
   .toast.show{transform:translateX(-50%) translateY(0);opacity:1}
   .toast.premium-toast{border-color:#d9a94b;background:#2a2314}
-  .sync-status{font-size:11px;color:#6c6c76;margin-top:3px}
-  .sync-status.online{color:#86d6a4}
   ::-webkit-scrollbar{width:6px}
   ::-webkit-scrollbar-thumb{background:#2f2f36;border-radius:3px}
   .mobile-view .sidebar{position:absolute;inset:0;width:100%;z-index:10;border-right:none}
@@ -87,6 +85,8 @@
     .mobile-view .chat-header{padding:12px 16px;min-height:60px}
     .msg{max-width:85%}
   }
+  .sync-status{font-size:11px;color:#6c6c76;margin-top:3px}
+  .sync-status.online{color:#86d6a4}
 </style>
 </head>
 <body>
@@ -154,11 +154,6 @@
   <label>Новый никнейм</label><input id="newNick" placeholder="Оставьте пустым, чтобы не менять">
   <div class="error" id="profError"></div>
   <div class="modal-actions"><button class="btn btn-primary" onclick="saveProfile()">Сохранить</button><button class="btn btn-secondary" onclick="closeModal('profileModal')">Закрыть</button></div>
-  <div class="modal-actions">
-    <button class="btn btn-secondary" onclick="exportData()">📥 Экспорт базы</button>
-    <button class="btn btn-secondary" onclick="document.getElementById('importFile').click()">📤 Импорт базы</button>
-  </div>
-  <input type="file" id="importFile" accept=".json" style="display:none" onchange="importData(event)">
   <div class="modal-actions"><button class="btn btn-danger" onclick="logout()">Выйти</button></div>
 </div></div>
 
@@ -180,23 +175,20 @@
 <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
 <script>
 /* ============================================================
-   DarkChat v3
-   Постоянное хранение: localStorage (у каждого устройства)
-   Синхронизация между устройствами: публичный MQTT-брокер EMQX
-   Ручной перенос: экспорт/импорт JSON-файла базы
+   DarkChat — Синхронизация через clusterfly.ru (Россия)
    ============================================================ */
-
-const MQTT_URL = 'wss://broker.emqx.io:8084/mqtt';
-const TOPIC_BASE = 'darkchat_2024_x7k9_'; // смени, если хочешь отдельный «канал»
+const MQTT_URL = 'wss://srv2.clusterfly.ru:9994/mqtt';
+const MQTT_USER = 'user_ae4123f7';
+const MQTT_PASS = 'lGfFsadXd-mDW';
+const TOPIC_BASE = MQTT_USER + '/darkchat_';
 const T_USERS = TOPIC_BASE + 'users';
 const T_CHATS = TOPIC_BASE + 'chats';
 const T_CHANNELS = TOPIC_BASE + 'channels';
 const T_MSG = TOPIC_BASE + 'msg_';
 
-const LS_KEY = 'dc_data_v3';
-const LS_SESSION = 'dc_session_v3';
+const LS_KEY = 'dc_data_v5';
+const LS_SESSION = 'dc_session_v5';
 
-/* ---------- Локальное хранилище ---------- */
 function loadLocal() {
   try {
     const raw = localStorage.getItem(LS_KEY);
@@ -205,24 +197,14 @@ function loadLocal() {
     return { users:d.users||{}, chats:d.chats||[], messages:d.messages||{}, channels:d.channels||[] };
   } catch { return { users:{}, chats:[], messages:{}, channels:[] }; }
 }
-function saveLocal() {
-  try {
-    localStorage.setItem(LS_KEY, JSON.stringify(server));
-  } catch(e) { console.warn('localStorage save failed', e); }
-}
+function saveLocal() { try { localStorage.setItem(LS_KEY, JSON.stringify(server)); } catch(e){} }
 function loadSession(){ try{ return JSON.parse(localStorage.getItem(LS_SESSION)); }catch{ return null; } }
 function saveSession(n){ localStorage.setItem(LS_SESSION, JSON.stringify(n)); }
 function clearSession(){ localStorage.removeItem(LS_SESSION); }
 
 let server = loadLocal();
 let session = loadSession();
-let state = {
-  currentUser: session || null,
-  activeChat: null,
-  activeType: 'chat',
-  currentTab: 'chats',
-  isMobile: window.innerWidth <= 720
-};
+let state = { currentUser: session || null, activeChat: null, activeType: 'chat', currentTab: 'chats', isMobile: window.innerWidth <= 720 };
 
 /* ---------- MQTT ---------- */
 let mqttClient = null;
@@ -230,40 +212,50 @@ let mqttReady = false;
 const subscribedMsgs = new Set();
 
 function initMqtt() {
-  if (typeof mqtt === 'undefined') { setTimeout(initMqtt, 500); return; }
   mqttClient = mqtt.connect(MQTT_URL, {
-    clientId: 'dc_' + Math.random().toString(16).slice(2, 10),
-    clean: true, connectTimeout: 10000, reconnectPeriod: 5000
+    clientId: MQTT_USER + '_' + Math.random().toString(16).slice(2, 8),
+    username: MQTT_USER,
+    password: MQTT_PASS,
+    clean: true,
+    connectTimeout: 10000,
+    reconnectPeriod: 5000
   });
+
   mqttClient.on('connect', () => {
     mqttReady = true;
-    updateSyncStatus(true);
+    const el = document.getElementById('syncStatus');
+    if(el) { el.textContent = 'в сети'; el.className = 'sync-status online'; }
+    
     mqttClient.subscribe([T_USERS, T_CHATS, T_CHANNELS], { qos: 0 });
-    // переподписаться на все известные чаты и запросить историю
     Object.keys(server.messages).forEach(cid => subscribeMsgs(cid));
+    
     if (state.currentUser) {
       publish(T_USERS, { type:'request', from: state.currentUser });
       publish(T_CHATS, { type:'request', from: state.currentUser });
       publish(T_CHANNELS, { type:'request', from: state.currentUser });
-      // отправить свои данные другим
+      
       const me = server.users[state.currentUser.toLowerCase()];
       if (me) publish(T_USERS, { type:'user', user: me });
       server.chats.forEach(c => publish(T_CHATS, { type:'chat', chat: c }));
       server.channels.forEach(ch => publish(T_CHANNELS, { type:'channel', channel: ch }));
     }
   });
+
   mqttClient.on('message', (topic, payload) => {
     let data; try { data = JSON.parse(payload.toString()); } catch { return; }
     handleMqtt(topic, data);
   });
-  mqttClient.on('close', () => { mqttReady = false; updateSyncStatus(false); });
-  mqttClient.on('offline', () => { mqttReady = false; updateSyncStatus(false); });
-  mqttClient.on('reconnect', () => updateSyncStatus(false));
-  mqttClient.on('error', (e) => console.warn('MQTT', e));
+
+  mqttClient.on('close', () => {
+    mqttReady = false;
+    const el = document.getElementById('syncStatus');
+    if(el) { el.textContent = 'офлайн'; el.className = 'sync-status'; }
+  });
 }
+
 function publish(topic, obj) {
   if (!mqttReady || !mqttClient) return;
-  try { mqttClient.publish(topic, JSON.stringify(obj), { qos: 0, retain: false }); } catch {}
+  try { mqttClient.publish(topic, JSON.stringify(obj), { qos: 0 }); } catch {}
 }
 function subscribeMsgs(cid) {
   const t = T_MSG + cid;
@@ -273,25 +265,15 @@ function subscribeMsgs(cid) {
   mqttClient.subscribe(t, { qos: 0 });
 }
 
-function updateSyncStatus(online) {
-  const el = document.getElementById('syncStatus');
-  if (!el) return;
-  el.textContent = online ? 'онлайн' : 'офлайн';
-  el.className = 'sync-status' + (online ? ' online' : '');
-}
-
-/* ---------- Обработка входящих ---------- */
 function handleMqtt(topic, data) {
   if (topic === T_USERS) {
     if (data.type === 'request') {
-      // кто-то просит данные — ответить всеми своими пользователями
       Object.values(server.users).forEach(u => publish(T_USERS, { type:'user', user:u }));
       return;
     }
     if (data.type === 'user' && data.user && data.user.nick) {
       const key = data.user.nick.toLowerCase();
       const ex = server.users[key];
-      // конфликт: побеждает более ранний createdAt
       if (!ex || (data.user.createdAt && (!ex.createdAt || data.user.createdAt < ex.createdAt))) {
         server.users[key] = data.user;
         saveLocal();
@@ -380,10 +362,12 @@ function doRegister() {
   if (nick.length < 3) { err.textContent = 'Ник минимум 3 символа'; return; }
   if (pass.length < 4) { err.textContent = 'Пароль минимум 4 символа'; return; }
   if (server.users[nick.toLowerCase()]) { err.textContent = 'Этот ник уже занят'; return; }
+  
   const user = { nick, pass, premium: false, createdAt: Date.now() };
   server.users[nick.toLowerCase()] = user;
   saveLocal();
   publish(T_USERS, { type:'user', user });
+  
   state.currentUser = nick; saveSession(nick);
   closeModal('registerModal'); enterApp();
 }
@@ -446,13 +430,16 @@ function saveProfile() {
   if (newNick.length < 3) { err.textContent = 'Ник минимум 3 символа'; return; }
   if (newNick.toLowerCase() === state.currentUser.toLowerCase()) { err.textContent = 'Это ваш текущий ник'; return; }
   if (server.users[newNick.toLowerCase()]) { err.textContent = 'Ник уже занят'; return; }
+  
   const u = getUser(state.currentUser); const oldNick = u.nick;
   delete server.users[oldNick.toLowerCase()];
   u.nick = newNick; server.users[newNick.toLowerCase()] = u;
   state.currentUser = newNick; saveSession(newNick);
+  
   server.chats.forEach(c => { if (c.a===oldNick) c.a=newNick; if (c.b===oldNick) c.b=newNick; });
   server.channels.forEach(c => { if (c.owner===oldNick) c.owner=newNick; });
   saveLocal();
+  
   publish(T_USERS,{type:'user',user:u});
   renderUser(); renderChatList(state.currentTab);
   closeModal('profileModal'); toast('Профиль обновлён');
@@ -470,51 +457,6 @@ function gearClick() {
   }
   if (u.premium) { toast('Вы уже Premium ✨', true); gearClicks = 0; return; }
   if (gearClicks > 0 && gearClicks < 5) toast('⚙ ' + gearClicks + '/5...');
-}
-
-/* ---------- Экспорт/импорт ---------- */
-function exportData() {
-  const data = JSON.stringify(server, null, 2);
-  const blob = new Blob([data], { type:'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'darkchat_backup_' + new Date().toISOString().slice(0,10) + '.json';
-  a.click();
-  URL.revokeObjectURL(url);
-  toast('База экспортирована');
-}
-
-function importData(ev) {
-  const file = ev.target.files[0]; if (!file) return;
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    try {
-      const imported = JSON.parse(e.target.result);
-      if (!imported.users || !imported.chats) throw new Error('bad format');
-      // слияние
-      Object.entries(imported.users||{}).forEach(([k,u]) => {
-        const ex = server.users[k];
-        if (!ex || (u.createdAt && (!ex.createdAt || u.createdAt < ex.createdAt))) server.users[k] = u;
-      });
-      (imported.chats||[]).forEach(c => { if (!server.chats.find(x => x.id === c.id)) server.chats.push(c); });
-      (imported.channels||[]).forEach(ch => { if (!server.channels.find(x => x.id === ch.id)) server.channels.push(ch); });
-      Object.entries(imported.messages||{}).forEach(([cid, msgs]) => {
-        if (!server.messages[cid]) server.messages[cid] = [];
-        msgs.forEach(m => { if (!server.messages[cid].some(x => x.id === m.id)) server.messages[cid].push(m); });
-      });
-      saveLocal();
-      // отправить в сеть
-      Object.values(server.users).forEach(u => publish(T_USERS,{type:'user',user:u}));
-      server.chats.forEach(c => publish(T_CHATS,{type:'chat',chat:c}));
-      server.channels.forEach(ch => publish(T_CHANNELS,{type:'channel',channel:ch}));
-      Object.entries(server.messages).forEach(([cid,msgs]) => msgs.forEach(m => publish(T_MSG+cid,{type:'msg',msg:m})));
-      renderUser(); renderChatList(state.currentTab); closeModal('profileModal');
-      toast('База импортирована и синхронизирована');
-    } catch(err) { toast('Ошибка импорта: ' + err.message); }
-    ev.target.value = '';
-  };
-  reader.readAsText(file);
 }
 
 /* ---------- Вкладки ---------- */
@@ -691,7 +633,7 @@ function showEmpty() {
   document.getElementById('chatHeader').innerHTML = '';
 }
 
-/* ---------- Синхронизация между вкладками одного браузера ---------- */
+/* ---------- Синхронизация между вкладками ---------- */
 window.addEventListener('storage', (e) => {
   if (e.key !== LS_KEY) return;
   server = loadLocal();
@@ -709,14 +651,14 @@ window.addEventListener('storage', (e) => {
   } else {
     showLogin();
   }
-  // периодический повторный запрос истории (на случай если кто-то был офлайн)
   setInterval(() => {
     if (!mqttReady || !state.currentUser) return;
     publish(T_USERS,{type:'request',from:state.currentUser});
     publish(T_CHATS,{type:'request',from:state.currentUser});
     publish(T_CHANNELS,{type:'request',from:state.currentUser});
     if (state.activeChat) publish(T_MSG+state.activeChat,{type:'request'});
-  }, 20000);
+  }, 15000);
 })();
 </script>
+</body>
 </html>
